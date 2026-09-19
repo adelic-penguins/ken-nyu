@@ -7,21 +7,44 @@ const IWATE_BOUNDS: mapboxgl.LngLatBoundsLike = [
     [142.15, 40.55],
 ];
 
-type Phase = 'placement' | 'handoff' | 'guessing' | 'result';
+type Phase = 'title' | 'placement' | 'handoff' | 'guessing' | 'result';
 
 export default function App() {
     const containerRef = useRef<HTMLDivElement>(null);
     const mapRef = useRef<mapboxgl.Map | null>(null);
+    const mapLoadedRef = useRef(false);
 
-    const [phase, setPhase] = useState<Phase>('placement');
+    const [phase, setPhase] = useState<Phase>('title');
     const [selectedMunicipality, setSelectedMunicipality] = useState<string | null>(null);
     const [nippleMunicipalities, setNippleMunicipalities] = useState<string[]>([]);
+    const [exploredMunicipalities, setExploredMunicipalities] = useState<string[]>([]);
+    const [turnCount, setTurnCount] = useState(1);
+    const [guessesThisTurn, setGuessesThisTurn] = useState(0);
 
+    const phaseRef = useRef<Phase>(phase);
     const nippleMunicipalitiesRef = useRef<string[]>([]);
+    const exploredMunicipalitiesRef = useRef<string[]>([]);
+
+    useEffect(() => {
+        phaseRef.current = phase;
+    }, [phase]);
 
     useEffect(() => {
         nippleMunicipalitiesRef.current = nippleMunicipalities;
     }, [nippleMunicipalities]);
+
+    useEffect(() => {
+        exploredMunicipalitiesRef.current = exploredMunicipalities;
+    }, [exploredMunicipalities]);
+
+    const resetGame = () => {
+        setNippleMunicipalities([]);
+        setExploredMunicipalities([]);
+        setSelectedMunicipality(null);
+        setTurnCount(1);
+        setGuessesThisTurn(0);
+        setPhase('title');
+    };
 
     useEffect(() => {
         if (!containerRef.current) return;
@@ -41,7 +64,7 @@ export default function App() {
         map.on('load', () => {
             map.addSource('iwate', {
                 type: 'geojson',
-                data: '/N03-21_03_210101.json',
+                data: `${import.meta.env.BASE_URL}N03-21_03_210101.json`,
             });
 
             // 岩手県全体
@@ -66,14 +89,26 @@ export default function App() {
                 },
             });
 
-            // 選択中の市区町村
+            // 探索済み（ハズレ・当たり問わず選んだ市区町村）
+            map.addLayer({
+                id: 'explored-municipalities',
+                type: 'fill',
+                source: 'iwate',
+                filter: ['in', ['get', 'N03_007'], ['literal', []]],
+                paint: {
+                    'fill-color': '#9e9e9e',
+                    'fill-opacity': 0.6,
+                },
+            });
+
+            // 選択中の市区町村（確定前の仮選択。確定済みのピンクとは別色にする）
             map.addLayer({
                 id: 'selected-municipality',
                 type: 'fill',
                 source: 'iwate',
                 filter: ['==', ['get', 'N03_007'], ''],
                 paint: {
-                    'fill-color': '#ff4081',
+                    'fill-color': '#ff9800',
                     'fill-opacity': 0.7,
                 },
             });
@@ -97,11 +132,44 @@ export default function App() {
 
                 if (!municipalityCode) return;
 
-                // 配置済みの市区町村は選び直せない
-                if (nippleMunicipalitiesRef.current.includes(municipalityCode)) return;
+                if (phaseRef.current === 'placement') {
+                    // 配置済みの市区町村は選び直せない
+                    if (nippleMunicipalitiesRef.current.includes(municipalityCode)) return;
 
-                setSelectedMunicipality(municipalityCode);
+                    setSelectedMunicipality(municipalityCode);
+                    return;
+                }
+
+                if (phaseRef.current === 'guessing') {
+                    // 探索済みの市区町村は選び直せない
+                    if (exploredMunicipalitiesRef.current.includes(municipalityCode)) return;
+
+                    const nextExplored = [...exploredMunicipalitiesRef.current, municipalityCode];
+
+                    setExploredMunicipalities(nextExplored);
+
+                    // 乳首を2箇所とも見つけたらクリア
+                    const foundAll = nippleMunicipalitiesRef.current.every((code) =>
+                        nextExplored.includes(code),
+                    );
+
+                    if (foundAll) {
+                        setPhase('result');
+                        return;
+                    }
+
+                    setGuessesThisTurn((prev) => {
+                        if (prev >= 1) {
+                            setTurnCount((turn) => turn + 1);
+                            return 0;
+                        }
+
+                        return prev + 1;
+                    });
+                }
             });
+
+            mapLoadedRef.current = true;
         });
 
         // ゲーム盤なので地図操作は禁止
@@ -116,6 +184,7 @@ export default function App() {
         return () => {
             map.remove();
             mapRef.current = null;
+            mapLoadedRef.current = false;
         };
     }, []);
 
@@ -123,16 +192,20 @@ export default function App() {
     useEffect(() => {
         const map = mapRef.current;
 
-        if (!map?.isStyleLoaded() || !selectedMunicipality) return;
+        if (!map || !mapLoadedRef.current) return;
 
-        map.setFilter('selected-municipality', ['==', ['get', 'N03_007'], selectedMunicipality]);
+        map.setFilter('selected-municipality', [
+            '==',
+            ['get', 'N03_007'],
+            selectedMunicipality ?? '',
+        ]);
     }, [selectedMunicipality]);
 
     // 配置済みの市区町村が変わったらハイライトを更新
     useEffect(() => {
         const map = mapRef.current;
 
-        if (!map?.isStyleLoaded()) return;
+        if (!map || !mapLoadedRef.current) return;
 
         map.setFilter('placed-municipalities', [
             'in',
@@ -141,8 +214,53 @@ export default function App() {
         ]);
     }, [nippleMunicipalities]);
 
+    // 探索済みの市区町村が変わったらハイライトを更新
+    useEffect(() => {
+        const map = mapRef.current;
+
+        if (!map || !mapLoadedRef.current) return;
+
+        map.setFilter('explored-municipalities', [
+            'in',
+            ['get', 'N03_007'],
+            ['literal', exploredMunicipalities],
+        ]);
+    }, [exploredMunicipalities]);
+
+    // 乳首の場所は配置フェーズと結果表示以外では隠す（探索側に見えないように）
+    useEffect(() => {
+        const map = mapRef.current;
+
+        if (!map || !mapLoadedRef.current) return;
+
+        const visibility = phase === 'placement' || phase === 'result' ? 'visible' : 'none';
+
+        map.setLayoutProperty('placed-municipalities', 'visibility', visibility);
+    }, [phase]);
+
     return (
         <>
+            {phase === 'title' && (
+                <div
+                    style={{
+                        position: 'fixed',
+                        inset: 0,
+                        zIndex: 1,
+                        display: 'flex',
+                        flexDirection: 'column',
+                        alignItems: 'center',
+                        justifyContent: 'center',
+                        gap: 16,
+                        background: 'white',
+                    }}
+                >
+                    <h1>県乳</h1>
+                    <button type="button" onClick={() => setPhase('placement')}>
+                        はじめる
+                    </button>
+                </div>
+            )}
+
             {phase === 'placement' && (
                 <div
                     style={{
@@ -205,12 +323,59 @@ export default function App() {
                 </div>
             )}
 
+            {phase === 'guessing' && (
+                <div
+                    style={{
+                        position: 'fixed',
+                        top: 10,
+                        left: 10,
+                        zIndex: 1,
+                        background: 'white',
+                        padding: 12,
+                    }}
+                >
+                    <div>ターン: {turnCount}</div>
+                    <div>このターンの探索: {guessesThisTurn}/2</div>
+                    <div>探索済み: {exploredMunicipalities.length}箇所</div>
+                    <div>
+                        発見:{' '}
+                        {
+                            nippleMunicipalities.filter((code) =>
+                                exploredMunicipalities.includes(code),
+                            ).length
+                        }
+                        /2
+                    </div>
+                </div>
+            )}
+
+            {phase === 'result' && (
+                <div
+                    style={{
+                        position: 'fixed',
+                        inset: 0,
+                        zIndex: 1,
+                        display: 'flex',
+                        flexDirection: 'column',
+                        alignItems: 'center',
+                        justifyContent: 'center',
+                        gap: 16,
+                        background: 'white',
+                    }}
+                >
+                    <div>乳首発見！</div>
+                    <button type="button" onClick={resetGame}>
+                        スタート画面へ
+                    </button>
+                </div>
+            )}
+
             <div
                 ref={containerRef}
                 style={{
                     width: '100vw',
                     height: '100vh',
-                    visibility: phase === 'handoff' ? 'hidden' : 'visible',
+                    visibility: phase === 'handoff' || phase === 'title' ? 'hidden' : 'visible',
                 }}
             />
         </>
